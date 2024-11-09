@@ -33,7 +33,7 @@ public static class InstancesRepository
         return $"ST_Intersects({geometryColumn}, ST_Transform(ST_MakeEnvelope({fromX}, {fromY}, {toX}, {toY}, 4326), {source_epsg})) {where}";
     }
 
-    public static List<Instance> GetInstances(NpgsqlConnection conn, string geometryTable, string geometryColumn, BoundingBox bbox, int source_epsg, string where = "", bool useScaleNonUniform = false, bool useGpuInstancing = false)
+    private static string GetBaseStatement(NpgsqlConnection conn, string geometryTable, string geometryColumn, BoundingBox bbox, int source_epsg, string where, bool useScaleNonUniform, bool useGpuInstancing)
     {
         var target_epsg = 4978;
         var fromX = ToInvariantCulture(bbox.XMin);
@@ -43,7 +43,7 @@ public static class InstancesRepository
 
         var scaleNonUniform = useScaleNonUniform ? "scale_non_uniform as scalenonuniform, " : string.Empty;
         conn.Open();
-        var select = $"SELECT ST_ASBinary(ST_Transform(st_force3d({geometryColumn}), {target_epsg})) as position, scale, {scaleNonUniform} model, tags";
+        var select = $"ST_ASBinary(ST_Transform(st_force3d({geometryColumn}), {target_epsg})) as position, scale, {scaleNonUniform} model, tags";
 
         if (useGpuInstancing)
         {
@@ -55,7 +55,25 @@ public static class InstancesRepository
         }
 
         var sql = FormattableString.Invariant($"{select} FROM {geometryTable} where {GetWhere(geometryColumn, where, fromX, fromY, toX, toY, source_epsg)}");
+        return sql;
+    }
+
+    public static List<Instance> GetInstances(NpgsqlConnection conn, string geometryTable, string geometryColumn, BoundingBox bbox, int source_epsg, string where = "", bool useScaleNonUniform = false, bool useGpuInstancing = false)
+    {
+        var sql = GetBaseStatement(conn, geometryTable, geometryColumn, bbox, source_epsg, where, useScaleNonUniform, useGpuInstancing);
+        sql = FormattableString.Invariant($"SELECT {sql}");
+
         var res = conn.Query<Instance>(sql).AsList();
+        conn.Close();
+        return res;
+    }
+
+    public static List<Instance> ClusterInstances(NpgsqlConnection conn, string geometryTable, string geometryColumn, BoundingBox bbox, int source_epsg, int size, string where = "", bool useScaleNonUniform = false, bool useGpuInstancing = false)
+    {
+        var sql = GetBaseStatement(conn, geometryTable, geometryColumn, bbox, source_epsg, where, useScaleNonUniform, useGpuInstancing);
+        sql = FormattableString.Invariant($"SELECT ST_ClusterKMeans({geometryColumn}, {size}) OVER () as cluster_id, {sql}");
+        sql = FormattableString.Invariant($"SELECT  distinct on (cluster_id) * from ({sql}) as clustered");
+        var res = conn.Query<Instance>(sql, commandTimeout: 600).AsList();
         conn.Close();
         return res;
     }
